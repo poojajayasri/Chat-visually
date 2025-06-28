@@ -1,0 +1,89 @@
+#!/bin/bash
+# setup.sh - DataMap AI Setup Script
+
+echo "🗺️ Setting up DataMap AI..."
+
+# Create directory structure
+echo "📁 Creating directory structure..."
+mkdir -p src/services
+mkdir -p src/models  
+mkdir -p src/ui/styles
+mkdir -p src/utils
+mkdir -p src/auth
+mkdir -p data/uploads
+mkdir -p data/vector_db
+mkdir -p tests
+mkdir -p logs
+
+# Create __init__.py files
+echo "📄 Creating Python package files..."
+touch src/__init__.py
+touch src/services/__init__.py
+touch src/models/__init__.py
+touch src/ui/__init__.py
+touch src/utils/__init__.py
+touch src/auth/__init__.py
+
+# Install Python dependencies
+echo "📦 Installing Python dependencies..."
+pip install -r requirements.txt
+
+# Create .env file template if it doesn't exist
+if [ ! -f .env ]; then
+    echo "⚙️ Creating .env template..."
+    cat > .env << EOF
+# Required - Get from https://platform.openai.com/api-keys
+OPENAI_API_KEY=your-openai-api-key-here
+
+# Required - Generate a secure random string
+SECRET_KEY=datamap-ai-secret-key-change-this-in-production
+
+# Optional configurations
+LLM_MODEL=gpt-4o-mini
+EMBEDDING_MODEL=text-embedding-3-small
+CHUNK_SIZE=1000
+CHUNK_OVERLAP=200
+DEBUG=false
+DATA_DIR=./data
+MAX_FILE_SIZE=52428800
+EOF
+    echo "📝 Please edit .env file with your actual API keys!"
+fi
+
+# Install system dependencies for OCR (optional)
+echo "🔧 Installing system dependencies..."
+if command -v apt-get &> /dev/null; then
+    echo "Installing tesseract for Ubuntu/Debian..."
+    sudo apt-get update
+    sudo apt-get install -y tesseract-ocr
+elif command -v brew &> /dev/null; then
+    echo "Installing tesseract for macOS..."
+    brew install tesseract
+elif command -v yum &> /dev/null; then
+    echo "Installing tesseract for RHEL/CentOS..."
+    sudo yum install -y tesseract
+else
+    echo "⚠️ Please manually install tesseract-ocr for OCR functionality"
+fi
+
+# Install Graphviz
+if command -v apt-get &> /dev/null; then
+    sudo apt-get install -y graphviz
+elif command -v brew &> /dev/null; then
+    brew install graphviz
+elif command -v yum &> /dev/null; then
+    sudo yum install -y graphviz
+else
+    echo "⚠️ Please manually install Graphviz for flowchart generation"
+fi
+
+echo "✅ Setup complete!"
+echo ""
+echo "🚀 To run DataMap AI:"
+echo "1. Edit .env file with your OpenAI API key"
+echo "2. Run: streamlit run main.py"
+echo "3. Open http://localhost:8501 in your browser"
+echo ""
+echo "📚 Demo credentials:"
+echo "Email: demo@datamap.ai"
+echo "Password: demo123"
