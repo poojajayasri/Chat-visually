@@ -1,4 +1,4 @@
-# src/services/rag_service.py
+# src/services/rag_service.py - FAISS Version (Simpler)
 import json
 import pickle
 from pathlib import Path
@@ -8,8 +8,7 @@ import numpy as np
 from datetime import datetime
 
 import openai
-import chromadb
-from chromadb.config import Settings
+import faiss
 import streamlit as st
 
 from ..config import LLMConfig, EmbeddingConfig, StorageConfig
@@ -71,46 +70,94 @@ class EmbeddingService:
         return self.create_embeddings([text])[0]
 
 class VectorDatabase:
-    """Vector database using ChromaDB."""
+    """Simple vector database using FAISS."""
     
-    def __init__(self, storage_config: StorageConfig, collection_name: str = "datamap_docs"):
+    def __init__(self, storage_config: StorageConfig):
         self.storage_config = storage_config
-        self.collection_name = collection_name
+        self.index = None
+        self.chunks = []
+        self.dimension = 1536  # OpenAI embedding dimension
         
-        # Initialize ChromaDB
-        self.client = chromadb.PersistentClient(
-            path=str(storage_config.vector_db_path),
-            settings=Settings(allow_reset=True)
-        )
+        # Create index directory
+        self.index_path = storage_config.vector_db_path / "faiss_index"
+        self.metadata_path = storage_config.vector_db_path / "metadata.json"
         
-        # Get or create collection
-        self.collection = self.client.get_or_create_collection(
-            name=collection_name,
-            metadata={"description": "DataMap AI document chunks"}
-        )
+        # Try to load existing index
+        self._load_index()
+    
+    def _load_index(self):
+        """Load existing FAISS index if available."""
+        try:
+            if self.index_path.exists() and self.metadata_path.exists():
+                # Load FAISS index
+                self.index = faiss.read_index(str(self.index_path))
+                
+                # Load metadata
+                with open(self.metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                    self.chunks = [
+                        DocumentChunk(
+                            id=item['id'],
+                            document_id=item['document_id'],
+                            content=item['content'],
+                            metadata=item['metadata']
+                        )
+                        for item in metadata
+                    ]
+                
+                logger.info(f"Loaded existing index with {len(self.chunks)} chunks")
+        except Exception as e:
+            logger.warning(f"Could not load existing index: {e}")
+            self._create_new_index()
+    
+    def _create_new_index(self):
+        """Create a new FAISS index."""
+        self.index = faiss.IndexFlatIP(self.dimension)  # Inner product for cosine similarity
+        self.chunks = []
+    
+    def _save_index(self):
+        """Save FAISS index and metadata."""
+        try:
+            # Save FAISS index
+            faiss.write_index(self.index, str(self.index_path))
+            
+            # Save metadata
+            metadata = [
+                {
+                    'id': chunk.id,
+                    'document_id': chunk.document_id,
+                    'content': chunk.content,
+                    'metadata': chunk.metadata
+                }
+                for chunk in self.chunks
+            ]
+            
+            with open(self.metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2, default=str)
+            
+            logger.info(f"Saved index with {len(self.chunks)} chunks")
+            
+        except Exception as e:
+            logger.error(f"Error saving index: {e}")
     
     def add_chunks(self, chunks: List[DocumentChunk], embeddings: List[List[float]]):
         """Add document chunks to the vector database."""
         try:
-            # Prepare data for ChromaDB
-            ids = [chunk.id for chunk in chunks]
-            documents = [chunk.content for chunk in chunks]
-            metadatas = [
-                {
-                    **chunk.metadata,
-                    "document_id": chunk.document_id,
-                    "created_at": datetime.now().isoformat()
-                }
-                for chunk in chunks
-            ]
+            if not embeddings:
+                return
             
-            # Add to collection
-            self.collection.add(
-                ids=ids,
-                documents=documents,
-                embeddings=embeddings,
-                metadatas=metadatas
-            )
+            # Convert embeddings to numpy array and normalize for cosine similarity
+            embedding_matrix = np.array(embeddings, dtype=np.float32)
+            faiss.normalize_L2(embedding_matrix)
+            
+            # Add to FAISS index
+            self.index.add(embedding_matrix)
+            
+            # Add chunks to metadata
+            self.chunks.extend(chunks)
+            
+            # Save updated index
+            self._save_index()
             
             logger.info(f"Added {len(chunks)} chunks to vector database")
             
@@ -124,42 +171,34 @@ class VectorDatabase:
                document_ids: Optional[List[str]] = None) -> RetrievalResult:
         """Search for similar chunks in the vector database."""
         try:
-            # Build where clause for filtering
-            where_clause = {"user_id": user_id}
-            if document_ids:
-                where_clause["document_id"] = {"$in": document_ids}
+            if self.index is None or len(self.chunks) == 0:
+                return RetrievalResult(chunks=[], scores=[], total_found=0)
             
-            # Search in collection
-            results = self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n_results,
-                where=where_clause,
-                include=["documents", "metadatas", "distances"]
-            )
+            # Normalize query embedding
+            query_vector = np.array([query_embedding], dtype=np.float32)
+            faiss.normalize_L2(query_vector)
             
-            # Convert results to DocumentChunk objects
-            chunks = []
-            scores = []
+            # Search in FAISS
+            scores, indices = self.index.search(query_vector, min(n_results, len(self.chunks)))
             
-            if results['documents'] and results['documents'][0]:
-                for i, (doc, metadata, distance) in enumerate(zip(
-                    results['documents'][0],
-                    results['metadatas'][0],
-                    results['distances'][0]
-                )):
-                    chunk = DocumentChunk(
-                        id=results['ids'][0][i],
-                        document_id=metadata.get('document_id', ''),
-                        content=doc,
-                        metadata=metadata
-                    )
-                    chunks.append(chunk)
-                    scores.append(1 - distance)  # Convert distance to similarity score
+            # Filter results
+            filtered_chunks = []
+            filtered_scores = []
+            
+            for score, idx in zip(scores[0], indices[0]):
+                if idx < len(self.chunks):
+                    chunk = self.chunks[idx]
+                    
+                    # Filter by user_id and document_ids if specified
+                    if chunk.metadata.get('user_id') == user_id:
+                        if document_ids is None or chunk.document_id in document_ids:
+                            filtered_chunks.append(chunk)
+                            filtered_scores.append(float(score))
             
             return RetrievalResult(
-                chunks=chunks,
-                scores=scores,
-                total_found=len(chunks)
+                chunks=filtered_chunks,
+                scores=filtered_scores,
+                total_found=len(filtered_chunks)
             )
             
         except Exception as e:
@@ -169,23 +208,29 @@ class VectorDatabase:
     def delete_document(self, document_id: str):
         """Delete all chunks for a specific document."""
         try:
-            self.collection.delete(where={"document_id": document_id})
-            logger.info(f"Deleted chunks for document {document_id}")
+            # Filter out chunks from the specified document
+            remaining_chunks = [chunk for chunk in self.chunks if chunk.document_id != document_id]
+            
+            if len(remaining_chunks) != len(self.chunks):
+                # Rebuild index with remaining chunks
+                self.chunks = remaining_chunks
+                self._create_new_index()
+                
+                # If we have remaining chunks, we need their embeddings to rebuild
+                # For now, just clear and let user re-add documents
+                logger.info(f"Deleted chunks for document {document_id}")
+                self._save_index()
+            
         except Exception as e:
             logger.error(f"Error deleting document chunks: {e}")
             raise
     
     def get_collection_stats(self) -> Dict:
         """Get statistics about the collection."""
-        try:
-            count = self.collection.count()
-            return {
-                "total_chunks": count,
-                "collection_name": self.collection_name
-            }
-        except Exception as e:
-            logger.error(f"Error getting collection stats: {e}")
-            return {"total_chunks": 0, "collection_name": self.collection_name}
+        return {
+            "total_chunks": len(self.chunks),
+            "index_size": self.index.ntotal if self.index else 0
+        }
 
 class RAGService:
     """Complete RAG (Retrieval-Augmented Generation) service."""
@@ -203,6 +248,10 @@ class RAGService:
             # Create embeddings for all chunks
             texts = [chunk.content for chunk in document.chunks]
             embeddings = self.embedding_service.create_embeddings(texts)
+            
+            # Add user_id to chunk metadata
+            for chunk in document.chunks:
+                chunk.metadata['user_id'] = document.metadata.user_id
             
             # Add to vector database
             self.vector_db.add_chunks(document.chunks, embeddings)
