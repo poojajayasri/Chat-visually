@@ -1,9 +1,9 @@
-# src/services/rag_service.py - FAISS Version (Simpler)
+# src/services/rag_service.py
 import json
 import pickle
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 import numpy as np
 from datetime import datetime
 
@@ -14,6 +14,7 @@ import streamlit as st
 from ..config import LLMConfig, EmbeddingConfig, StorageConfig
 from ..models.document import Document, DocumentChunk
 from ..utils.logger import get_logger
+from .embedding_service import EmbeddingService
 
 logger = get_logger(__name__)
 
@@ -31,43 +32,6 @@ class RAGResponse:
     sources: List[DocumentChunk]
     retrieval_score: float
     processing_time: float
-
-class EmbeddingService:
-    """Service for creating and managing embeddings."""
-    
-    def __init__(self, config: EmbeddingConfig, llm_config: LLMConfig):
-        self.config = config
-        self.llm_config = llm_config
-        self.client = openai.OpenAI(api_key=llm_config.openai_api_key)
-    
-    @st.cache_data(ttl=3600)  # Cache for 1 hour
-    def create_embeddings(_self, texts: List[str]) -> List[List[float]]:
-        """Create embeddings for a list of texts."""
-        try:
-            # Process in batches
-            all_embeddings = []
-            batch_size = _self.config.batch_size
-            
-            for i in range(0, len(texts), batch_size):
-                batch = texts[i:i + batch_size]
-                
-                response = _self.client.embeddings.create(
-                    model=_self.config.model_name,
-                    input=batch
-                )
-                
-                batch_embeddings = [item.embedding for item in response.data]
-                all_embeddings.extend(batch_embeddings)
-            
-            return all_embeddings
-            
-        except Exception as e:
-            logger.error(f"Error creating embeddings: {e}")
-            raise
-    
-    def create_embedding(self, text: str) -> List[float]:
-        """Create embedding for a single text."""
-        return self.create_embeddings([text])[0]
 
 class VectorDatabase:
     """Simple vector database using FAISS."""
@@ -118,6 +82,9 @@ class VectorDatabase:
     def _save_index(self):
         """Save FAISS index and metadata."""
         try:
+            # Create directory if it doesn't exist
+            self.index_path.parent.mkdir(parents=True, exist_ok=True)
+            
             # Save FAISS index
             faiss.write_index(self.index, str(self.index_path))
             
@@ -145,6 +112,10 @@ class VectorDatabase:
         try:
             if not embeddings:
                 return
+            
+            # Create index if it doesn't exist
+            if self.index is None:
+                self._create_new_index()
             
             # Convert embeddings to numpy array and normalize for cosine similarity
             embedding_matrix = np.array(embeddings, dtype=np.float32)
@@ -186,11 +157,12 @@ class VectorDatabase:
             filtered_scores = []
             
             for score, idx in zip(scores[0], indices[0]):
-                if idx < len(self.chunks):
+                if idx >= 0 and idx < len(self.chunks):  # Valid index check
                     chunk = self.chunks[idx]
                     
                     # Filter by user_id and document_ids if specified
-                    if chunk.metadata.get('user_id') == user_id:
+                    chunk_user_id = chunk.metadata.get('user_id', user_id)  # Fallback to current user
+                    if chunk_user_id == user_id:
                         if document_ids is None or chunk.document_id in document_ids:
                             filtered_chunks.append(chunk)
                             filtered_scores.append(float(score))
@@ -204,26 +176,6 @@ class VectorDatabase:
         except Exception as e:
             logger.error(f"Error searching vector database: {e}")
             return RetrievalResult(chunks=[], scores=[], total_found=0)
-    
-    def delete_document(self, document_id: str):
-        """Delete all chunks for a specific document."""
-        try:
-            # Filter out chunks from the specified document
-            remaining_chunks = [chunk for chunk in self.chunks if chunk.document_id != document_id]
-            
-            if len(remaining_chunks) != len(self.chunks):
-                # Rebuild index with remaining chunks
-                self.chunks = remaining_chunks
-                self._create_new_index()
-                
-                # If we have remaining chunks, we need their embeddings to rebuild
-                # For now, just clear and let user re-add documents
-                logger.info(f"Deleted chunks for document {document_id}")
-                self._save_index()
-            
-        except Exception as e:
-            logger.error(f"Error deleting document chunks: {e}")
-            raise
     
     def get_collection_stats(self) -> Dict:
         """Get statistics about the collection."""
@@ -272,6 +224,14 @@ class RAGService:
             # Create embedding for the question
             question_embedding = self.embedding_service.create_embedding(question)
             
+            if not question_embedding:
+                return RAGResponse(
+                    answer="I couldn't process your question. Please try again.",
+                    sources=[],
+                    retrieval_score=0.0,
+                    processing_time=(datetime.now() - start_time).total_seconds()
+                )
+            
             # Retrieve relevant chunks
             retrieval_result = self.vector_db.search(
                 query_embedding=question_embedding,
@@ -282,7 +242,7 @@ class RAGService:
             
             if not retrieval_result.chunks:
                 return RAGResponse(
-                    answer="I couldn't find any relevant information to answer your question.",
+                    answer="I couldn't find any relevant information to answer your question. Please make sure you have uploaded relevant documents.",
                     sources=[],
                     retrieval_score=0.0,
                     processing_time=(datetime.now() - start_time).total_seconds()
