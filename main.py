@@ -1,4 +1,4 @@
-# main.py - MINIMAL WORKING VERSION (No Import Conflicts)
+# main.py - COMPLETE FIXED VERSION
 import streamlit as st
 import openai
 import time
@@ -16,7 +16,7 @@ st.set_page_config(
 )
 
 class SimpleDataMapApp:
-    """Minimal working DataMap AI application."""
+    """Complete working DataMap AI application."""
     
     def __init__(self):
         self._initialize_session_state()
@@ -122,6 +122,8 @@ class SimpleDataMapApp:
             # Stats
             if st.session_state.documents:
                 st.metric("Documents", len(st.session_state.documents))
+                total_chunks = sum(len(doc['chunks']) for doc in st.session_state.documents)
+                st.metric("Text Chunks", total_chunks)
             
             api_status = "✅" if self.openai_api_key else "❌"
             st.metric("API Key", api_status)
@@ -187,8 +189,10 @@ class SimpleDataMapApp:
         st.markdown("---")
         if not self.openai_api_key:
             st.warning("⚠️ OpenAI API key not configured. Go to Settings to add it.")
+        elif not st.session_state.documents:
+            st.info("📁 Ready to use! Upload some documents to get started.")
         else:
-            st.success("✅ Ready to use! Upload some documents to get started.")
+            st.success(f"✅ All set! You have {len(st.session_state.documents)} documents ready to explore.")
     
     def _render_upload(self):
         """Render upload page."""
@@ -250,6 +254,7 @@ class SimpleDataMapApp:
                 with st.expander(f"📄 {doc['title']}"):
                     st.write(f"**Type:** {doc['type']}")
                     st.write(f"**Chunks:** {len(doc['chunks'])}")
+                    st.write(f"**Content Length:** {len(doc['content'])} characters")
                     st.write(f"**Preview:** {doc['content'][:200]}...")
                     
                     if st.button(f"🗑️ Delete", key=f"del_{i}"):
@@ -278,7 +283,7 @@ class SimpleDataMapApp:
         return chunks
     
     def _render_chat(self):
-        """Render chat page."""
+        """Render chat page with debug info."""
         st.title("💬 Chat with Your Documents")
         
         if not st.session_state.documents:
@@ -292,6 +297,40 @@ class SimpleDataMapApp:
             st.error("❌ OpenAI API key not configured. Go to Settings.")
             return
         
+        # Debug info
+        with st.expander("🔍 Debug Information"):
+            st.write(f"**Documents loaded:** {len(st.session_state.documents)}")
+            for i, doc in enumerate(st.session_state.documents):
+                st.write(f"**{i+1}. {doc['title']}**")
+                st.write(f"  - Type: {doc['type']}")
+                st.write(f"  - Chunks: {len(doc['chunks'])}")
+                st.write(f"  - Content length: {len(doc['content'])} characters")
+                st.write(f"  - Preview: {doc['content'][:100]}...")
+            
+            st.write(f"**API Key configured:** {bool(self.client)}")
+        
+        # Suggested questions
+        st.markdown("### 💡 Try these questions:")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("📋 Summarize all documents"):
+                st.session_state.suggested_question = "Please provide a summary of all the documents"
+                st.rerun()
+            
+            if st.button("🔍 What are the main topics?"):
+                st.session_state.suggested_question = "What are the main topics covered in these documents?"
+                st.rerun()
+        
+        with col2:
+            if st.button("📊 List key information"):
+                st.session_state.suggested_question = "List the key information from each document"
+                st.rerun()
+            
+            if st.button("❓ What can you tell me?"):
+                st.session_state.suggested_question = "What can you tell me about these documents?"
+                st.rerun()
+        
         # Initialize chat
         if not st.session_state.chat_messages:
             st.session_state.chat_messages = [{
@@ -303,6 +342,24 @@ class SimpleDataMapApp:
         for message in st.session_state.chat_messages:
             with st.chat_message(message["role"]):
                 st.write(message["content"])
+        
+        # Handle suggested questions
+        if hasattr(st.session_state, 'suggested_question'):
+            prompt = st.session_state.suggested_question
+            del st.session_state.suggested_question
+            
+            # Add user message
+            st.session_state.chat_messages.append({"role": "user", "content": prompt})
+            
+            with st.chat_message("user"):
+                st.write(prompt)
+            
+            # Generate response
+            with st.chat_message("assistant"):
+                with st.spinner("Analyzing your documents..."):
+                    response = self._generate_response(prompt)
+                    st.write(response)
+                    st.session_state.chat_messages.append({"role": "assistant", "content": response})
         
         # Chat input
         if prompt := st.chat_input("Ask about your documents..."):
@@ -319,25 +376,100 @@ class SimpleDataMapApp:
                     st.write(response)
                     st.session_state.chat_messages.append({"role": "assistant", "content": response})
     
+    def _find_relevant_chunks(self, question: str) -> List[dict]:
+        """Improved chunk finding that actually works."""
+        all_chunks = []
+        
+        # Collect ALL chunks from ALL documents
+        for doc in st.session_state.documents:
+            for i, chunk in enumerate(doc['chunks']):
+                all_chunks.append({
+                    'content': chunk,
+                    'score': 1.0,  # Give all chunks a base score
+                    'doc_title': doc['title'],
+                    'chunk_index': i
+                })
+        
+        # If we have chunks, return them
+        if all_chunks:
+            # For general questions, return first few chunks
+            general_words = ['summary', 'about', 'what', 'tell', 'overview', 'describe', 'explain', 'main', 'key', 'list']
+            if any(word in question.lower() for word in general_words):
+                return all_chunks[:5]  # Return first 5 chunks
+            
+            # For specific questions, try keyword matching
+            question_words = set(question.lower().split())
+            scored_chunks = []
+            
+            for chunk_data in all_chunks:
+                chunk_words = set(chunk_data['content'].lower().split())
+                common_words = question_words.intersection(chunk_words)
+                score = len(common_words)
+                
+                if score > 0:
+                    chunk_data['score'] = score
+                    scored_chunks.append(chunk_data)
+            
+            # If we found matches, return them
+            if scored_chunks:
+                scored_chunks.sort(key=lambda x: x['score'], reverse=True)
+                return scored_chunks[:5]
+            
+            # If no keyword matches, return first few chunks anyway
+            return all_chunks[:3]
+        
+        return []
+    
     def _generate_response(self, question: str) -> str:
-        """Generate response using simple RAG."""
+        """Generate response with better error handling."""
         try:
+            # Debug: Check if we have documents
+            if not st.session_state.documents:
+                return "No documents uploaded. Please upload some documents first."
+            
+            # Debug: Check total chunks
+            total_chunks = sum(len(doc['chunks']) for doc in st.session_state.documents)
+            if total_chunks == 0:
+                return "Your documents don't seem to have any content. Please check your uploads."
+            
             # Get relevant chunks
             relevant_chunks = self._find_relevant_chunks(question)
             
+            # Debug: Show what we found
             if not relevant_chunks:
-                return "I couldn't find relevant information in your documents to answer that question."
+                # Fallback: just describe the documents
+                doc_info = []
+                for doc in st.session_state.documents:
+                    doc_info.append(f"- {doc['title']}: {len(doc['chunks'])} chunks, preview: {doc['content'][:150]}...")
+                
+                return f"""I have access to your {len(st.session_state.documents)} documents:
+
+{chr(10).join(doc_info)}
+
+Please ask a more specific question about the content, or I can try to help with what you'd like to know."""
             
-            # Create context
-            context = "\n\n".join([f"Document: {chunk['doc_title']}\nContent: {chunk['content']}" 
-                                 for chunk in relevant_chunks[:3]])
+            # Create context from chunks
+            context_parts = []
+            for chunk_data in relevant_chunks[:3]:
+                context_parts.append(f"From '{chunk_data['doc_title']}':\n{chunk_data['content']}")
             
-            # Generate response
+            context = "\n\n".join(context_parts)
+            
+            # Generate response with OpenAI
+            if not self.client:
+                return "OpenAI client not configured. Please check your API key in Settings."
+            
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant. Answer questions based on the provided context. If the context doesn't contain enough information, say so."},
-                    {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"}
+                    {
+                        "role": "system", 
+                        "content": "You are a helpful assistant. Answer questions based on the provided document context. Be specific and cite which document you're referencing."
+                    },
+                    {
+                        "role": "user", 
+                        "content": f"Based on these documents:\n\n{context}\n\nQuestion: {question}\n\nPlease provide a helpful answer based on the document content."
+                    }
                 ],
                 max_tokens=500,
                 temperature=0.1
@@ -346,28 +478,7 @@ class SimpleDataMapApp:
             return response.choices[0].message.content
             
         except Exception as e:
-            return f"Error generating response: {str(e)}"
-    
-    def _find_relevant_chunks(self, question: str) -> List[dict]:
-        """Simple keyword-based chunk finding."""
-        question_words = set(question.lower().split())
-        scored_chunks = []
-        
-        for doc in st.session_state.documents:
-            for chunk in doc['chunks']:
-                chunk_words = set(chunk.lower().split())
-                score = len(question_words.intersection(chunk_words))
-                
-                if score > 0:
-                    scored_chunks.append({
-                        'content': chunk,
-                        'score': score,
-                        'doc_title': doc['title']
-                    })
-        
-        # Sort by score and return top chunks
-        scored_chunks.sort(key=lambda x: x['score'], reverse=True)
-        return scored_chunks[:5]
+            return f"Error generating response: {str(e)}. Debug info: {len(st.session_state.documents)} documents, API key configured: {bool(self.client)}"
     
     def _render_visualization(self):
         """Render visualization page."""
@@ -412,6 +523,7 @@ class SimpleDataMapApp:
                         mindmap = self._generate_mindmap(query, context)
                         if mindmap:
                             st.success("✅ Mindmap generated!")
+                            st.markdown("#### 🧠 Mindmap Structure:")
                             for item in mindmap:
                                 st.markdown(f"- **{item['main']}** → {item['sub']}")
                 
@@ -440,6 +552,13 @@ class SimpleDataMapApp:
                 return f'''
                 digraph {{
                     rankdir=TB;
+                    node [shape=box, style=rounded];
+                    "Topic: {topic[:20]}..." [style=filled, fillcolor=lightblue];
+                    "Key Concept 1" [style=filled, fillcolor=lightgreen];
+                    "Key Concept 2" [style=filled, fillcolor=lightgreen];
+                    "Detail A" [style=filled, fillcolor=lightyellow];
+                    "Detail B" [style=filled, fillcolor=lightyellow];
+                    
                     "Topic: {topic[:20]}..." -> "Key Concept 1";
                     "Topic: {topic[:20]}..." -> "Key Concept 2";
                     "Key Concept 1" -> "Detail A";
@@ -469,9 +588,10 @@ class SimpleDataMapApp:
             
             current_main = topic
             for line in lines[:8]:  # Limit to 8 items
-                if line.startswith('-') or line.startswith('•'):
-                    sub_concept = line.lstrip('-•').strip()
-                    mindmap.append({'main': current_main, 'sub': sub_concept})
+                if line.startswith('-') or line.startswith('•') or line.startswith('*'):
+                    sub_concept = line.lstrip('-•*').strip()
+                    if sub_concept:
+                        mindmap.append({'main': current_main, 'sub': sub_concept})
                 elif len(line) < 50:  # Likely a main concept
                     current_main = line
             
@@ -521,6 +641,21 @@ class SimpleDataMapApp:
             st.metric("Total Chunks", total_chunks)
             st.metric("API Status", "✅ Connected" if self.client else "❌ Not Connected")
         
+        # Document details
+        if st.session_state.documents:
+            st.markdown("---")
+            st.markdown("### 📋 Document Details")
+            for i, doc in enumerate(st.session_state.documents):
+                with st.expander(f"📄 {doc['title']}"):
+                    st.write(f"**Type:** {doc['type']}")
+                    st.write(f"**Chunks:** {len(doc['chunks'])}")
+                    st.write(f"**Total Characters:** {len(doc['content'])}")
+                    st.write(f"**Words:** {len(doc['content'].split())}")
+                    
+                    # Show chunks
+                    for j, chunk in enumerate(doc['chunks'][:3]):  # Show first 3 chunks
+                        st.write(f"**Chunk {j+1}:** {chunk[:100]}...")
+        
         # Data management
         st.markdown("---")
         st.markdown("### 🗑️ Data Management")
@@ -531,11 +666,13 @@ class SimpleDataMapApp:
             if st.button("🗑️ Clear Documents"):
                 st.session_state.documents = []
                 st.success("Documents cleared!")
+                st.rerun()
         
         with col2:
             if st.button("🗑️ Clear Chat"):
                 st.session_state.chat_messages = []
                 st.success("Chat history cleared!")
+                st.rerun()
 
 def main():
     """Application entry point."""
