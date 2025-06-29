@@ -481,15 +481,18 @@ Please ask a more specific question about the content, or I can try to help with
             return f"Error generating response: {str(e)}. Debug info: {len(st.session_state.documents)} documents, API key configured: {bool(self.client)}"
     
     def _render_visualization(self):
-        """Render visualization page."""
+        """Render visualization page with working visuals."""
         st.title("📊 Knowledge Visualization")
         
         if not st.session_state.documents:
             st.warning("📁 No documents uploaded yet.")
+            if st.button("📁 Upload Documents"):
+                st.session_state.current_page = 'upload'
+                st.rerun()
             return
         
         if not self.client:
-            st.error("❌ OpenAI API key not configured.")
+            st.error("❌ OpenAI API key not configured. Go to Settings.")
             return
         
         st.markdown("### Create Visual Knowledge Maps")
@@ -499,8 +502,24 @@ Please ask a more specific question about the content, or I can try to help with
         
         query = st.text_area(
             "What would you like to visualize?",
-            placeholder="Enter a topic from your documents to create a visual representation..."
+            placeholder="Enter a topic from your documents to create a visual representation...",
+            help="Try: 'Show me the main concepts', 'Visualize the process', or 'Map out the key information'"
         )
+        
+        # Example queries
+        st.markdown("**💡 Example queries:**")
+        examples = [
+            "Show me the main concepts",
+            "Visualize the key information", 
+            "Map out the important details",
+            "Create a overview of the content"
+        ]
+        
+        example_cols = st.columns(4)
+        for i, example in enumerate(examples):
+            with example_cols[i]:
+                if st.button(example, key=f"example_{i}"):
+                    query = example
         
         if st.button("🎨 Generate Visualization", type="primary") and query:
             with st.spinner(f"Generating {viz_type.lower()}..."):
@@ -515,67 +534,95 @@ Please ask a more specific question about the content, or I can try to help with
                     context = "\n".join([chunk['content'] for chunk in relevant_chunks[:3]])
                     
                     if viz_type == "Flowchart":
+                        st.info("🔄 Creating flowchart...")
                         flowchart = self._generate_flowchart(query, context)
+                        
                         if flowchart:
                             st.success("✅ Flowchart generated!")
-                            st.graphviz_chart(flowchart)
-                    else:
-                        mindmap = self._generate_mindmap(query, context)
-                        if mindmap:
+                            
+                            # Debug info
+                            with st.expander("🔍 Debug - View DOT Code"):
+                                st.code(flowchart, language='dot')
+                            
+                            try:
+                                st.graphviz_chart(flowchart)
+                            except Exception as e:
+                                st.error(f"Error rendering flowchart: {e}")
+                                st.code(flowchart, language='dot')
+                        else:
+                            st.error("Failed to generate flowchart")
+                    
+                    else:  # Mindmap
+                        st.info("🧠 Creating mindmap...")
+                        mindmap_data = self._generate_mindmap(query, context)
+                        
+                        if mindmap_data:
                             st.success("✅ Mindmap generated!")
-                            st.markdown("#### 🧠 Mindmap Structure:")
-                            for item in mindmap:
-                                st.markdown(f"- **{item['main']}** → {item['sub']}")
-                
+                            
+                            # Try to render visual mindmap
+                            visual_success = self._render_mindmap_visual(mindmap_data)
+                            
+                            if not visual_success:
+                                # Fallback to text display
+                                st.markdown("#### 🧠 Mindmap Structure:")
+                                for i, item in enumerate(mindmap_data, 1):
+                                    st.markdown(f"{i}. **{item['main']}** → {item['sub']}")
+                            
+                            # Show connections in expandable section
+                            with st.expander("📋 View Mindmap Connections"):
+                                for item in mindmap_data:
+                                    st.write(f"• **{item['main']}** connects to **{item['sub']}**")
+                        else:
+                            st.error("Failed to generate mindmap")
+                    
                 except Exception as e:
                     st.error(f"Error generating visualization: {e}")
+                    st.info("💡 Try a simpler query or check your document content.")
     
-  # Replace these functions in your main.py
-
-def _generate_flowchart(self, topic: str, context: str) -> Optional[str]:
-    """Generate a working flowchart in DOT notation."""
-    try:
-        response = self.client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": """Create a flowchart in DOT notation. Rules:
+    def _generate_flowchart(self, topic: str, context: str) -> Optional[str]:
+        """Generate a working flowchart in DOT notation."""
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": """Create a flowchart in DOT notation. Rules:
 1. Start with 'digraph {'
 2. End with '}'
 3. Use quotes around node names
 4. Use -> for connections
 5. Maximum 8 nodes
 6. Return ONLY the DOT code, no explanations"""
-                },
-                {
-                    "role": "user", 
-                    "content": f"Create a flowchart about: {topic}\n\nContext: {context[:500]}\n\nShow main concepts and their relationships."
-                }
-            ],
-            max_tokens=400,
-            temperature=0.1
-        )
-        
-        dot_code = response.choices[0].message.content.strip()
-        
-        # Clean the response - remove markdown formatting
-        if "```" in dot_code:
-            lines = dot_code.split('\n')
-            dot_lines = []
-            in_code_block = False
-            for line in lines:
-                if line.strip().startswith('```'):
-                    in_code_block = not in_code_block
-                    continue
-                if in_code_block or line.strip().startswith('digraph') or '->' in line or line.strip() == '}':
-                    dot_lines.append(line)
-            dot_code = '\n'.join(dot_lines)
-        
-        # Validate and fix DOT code
-        if not dot_code.strip().startswith('digraph'):
-            # Create a fallback flowchart based on the topic
-            return f'''digraph {{
+                    },
+                    {
+                        "role": "user", 
+                        "content": f"Create a flowchart about: {topic}\n\nContext: {context[:500]}\n\nShow main concepts and their relationships."
+                    }
+                ],
+                max_tokens=400,
+                temperature=0.1
+            )
+            
+            dot_code = response.choices[0].message.content.strip()
+            
+            # Clean the response - remove markdown formatting
+            if "```" in dot_code:
+                lines = dot_code.split('\n')
+                dot_lines = []
+                in_code_block = False
+                for line in lines:
+                    if line.strip().startswith('```'):
+                        in_code_block = not in_code_block
+                        continue
+                    if in_code_block or line.strip().startswith('digraph') or '->' in line or line.strip() == '}':
+                        dot_lines.append(line)
+                dot_code = '\n'.join(dot_lines)
+            
+            # Validate and fix DOT code
+            if not dot_code.strip().startswith('digraph'):
+                # Create a fallback flowchart based on the topic
+                return f'''digraph {{
     rankdir=TB;
     node [shape=box, style="rounded,filled", fillcolor=lightblue];
     
@@ -590,16 +637,16 @@ def _generate_flowchart(self, topic: str, context: str) -> Optional[str]:
     "Concept 1" -> "Detail 1";
     "Concept 2" -> "Detail 2";
 }}'''
-        
-        # Ensure proper structure
-        if not dot_code.strip().endswith('}'):
-            dot_code += '\n}'
             
-        return dot_code
-        
-    except Exception as e:
-        # Return a simple working flowchart
-        return f'''digraph {{
+            # Ensure proper structure
+            if not dot_code.strip().endswith('}'):
+                dot_code += '\n}'
+                
+            return dot_code
+            
+        except Exception as e:
+            # Return a simple working flowchart
+            return f'''digraph {{
     rankdir=TB;
     node [shape=box, style="rounded,filled", fillcolor=lightblue];
     
@@ -611,276 +658,176 @@ def _generate_flowchart(self, topic: str, context: str) -> Optional[str]:
     "Topic" -> "Key Point 2";
 }}'''
 
-    
     def _generate_mindmap(self, topic: str, context: str) -> Optional[List[dict]]:
-    """Generate mindmap data for visual display."""
-    try:
-        response = self.client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "Extract 6-10 key concepts from the context and organize them hierarchically. Return as simple bullet points."
-                },
-                {
-                    "role": "user", 
-                    "content": f"Topic: {topic}\nContext: {context[:500]}\n\nList main concepts and their sub-concepts as bullet points."
-                }
-            ],
-            max_tokens=300,
-            temperature=0.1
-        )
-        
-        content = response.choices[0].message.content
-        lines = [line.strip() for line in content.split('\n') if line.strip()]
-        
-        mindmap = []
-        current_main = topic
-        
-        for line in lines:
-            if line.startswith('-') or line.startswith('•') or line.startswith('*'):
-                sub_concept = line.lstrip('-•*').strip()
-                if sub_concept and len(sub_concept) > 2:
-                    mindmap.append({'main': current_main, 'sub': sub_concept})
-            elif ':' in line:
-                # Handle lines like "Main concept: sub concept"
-                parts = line.split(':', 1)
-                if len(parts) == 2:
-                    main_part = parts[0].strip()
-                    sub_part = parts[1].strip()
-                    if main_part and sub_part:
-                        mindmap.append({'main': main_part, 'sub': sub_part})
-            elif len(line) < 60 and len(line) > 5:  # Likely a main concept
-                current_main = line.strip(':-•*')
-        
-        # Ensure we have some data
-        if not mindmap:
-            mindmap = [
-                {'main': topic, 'sub': 'Key Concept 1'},
-                {'main': topic, 'sub': 'Key Concept 2'},
-                {'main': topic, 'sub': 'Important Detail'},
-            ]
-        
-        return mindmap[:10]  # Limit to 10 items
-        
-    except Exception as e:
-        # Fallback mindmap
-        return [
-            {'main': topic, 'sub': 'Main Concept'},
-            {'main': topic, 'sub': 'Key Detail'},
-            {'main': topic, 'sub': 'Important Point'},
-        ]
-
-def _render_mindmap_visual(self, connections: List[dict]):
-    """Render mindmap as an interactive network using Plotly."""
-    try:
-        import plotly.graph_objects as go
-        import plotly.express as px
-        from plotly.subplots import make_subplots
-        import networkx as nx
-        import numpy as np
-        
-        # Create network graph
-        G = nx.Graph()
-        
-        # Add edges from connections
-        for conn in connections:
-            G.add_edge(conn['main'], conn['sub'])
-        
-        # Calculate layout
-        pos = nx.spring_layout(G, k=3, iterations=50, seed=42)
-        
-        # Create edge traces
-        edge_x = []
-        edge_y = []
-        for edge in G.edges():
-            x0, y0 = pos[edge[0]]
-            x1, y1 = pos[edge[1]]
-            edge_x.extend([x0, x1, None])
-            edge_y.extend([y0, y1, None])
-        
-        edge_trace = go.Scatter(
-            x=edge_x, y=edge_y,
-            line=dict(width=2, color='#888'),
-            hoverinfo='none',
-            mode='lines'
-        )
-        
-        # Create node traces
-        node_x = []
-        node_y = []
-        node_text = []
-        node_info = []
-        node_colors = []
-        node_sizes = []
-        
-        # Get unique nodes and classify them
-        main_nodes = set(conn['main'] for conn in connections)
-        
-        for node in G.nodes():
-            x, y = pos[node]
-            node_x.append(x)
-            node_y.append(y)
-            
-            # Shorten long text for display
-            display_text = node if len(node) <= 20 else node[:17] + "..."
-            node_text.append(display_text)
-            node_info.append(node)  # Full text for hover
-            
-            # Color and size based on node type
-            if node in main_nodes:
-                node_colors.append('#FF6B6B')  # Red for main topics
-                node_sizes.append(30)
-            else:
-                node_colors.append('#4ECDC4')  # Teal for sub-concepts
-                node_sizes.append(20)
-        
-        node_trace = go.Scatter(
-            x=node_x, y=node_y,
-            mode='markers+text',
-            hoverinfo='text',
-            hovertext=node_info,
-            text=node_text,
-            textposition="middle center",
-            textfont=dict(size=10, color='white'),
-            marker=dict(
-                size=node_sizes,
-                color=node_colors,
-                line=dict(width=2, color='white')
+        """Generate mindmap data for visual display."""
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": "Extract 6-10 key concepts from the context and organize them hierarchically. Return as simple bullet points."
+                    },
+                    {
+                        "role": "user", 
+                        "content": f"Topic: {topic}\nContext: {context[:500]}\n\nList main concepts and their sub-concepts as bullet points."
+                    }
+                ],
+                max_tokens=300,
+                temperature=0.1
             )
-        )
-        
-        # Create the figure
-        fig = go.Figure(data=[edge_trace, node_trace],
-                       layout=go.Layout(
-                           title='Interactive Mindmap',
-                           titlefont_size=16,
-                           showlegend=False,
-                           hovermode='closest',
-                           margin=dict(b=20,l=5,r=5,t=40),
-                           annotations=[ dict(
-                               text="Click and drag to explore the mindmap",
-                               showarrow=False,
-                               xref="paper", yref="paper",
-                               x=0.005, y=-0.002,
-                               xanchor="left", yanchor="bottom",
-                               font=dict(color="gray", size=12)
-                           )],
-                           xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                           yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                           height=500,
-                           plot_bgcolor='white'
-                       ))
-        
-        st.plotly_chart(fig, use_container_width=True)
-        return True
-        
-    except ImportError:
-        st.error("Plotly not available. Install with: pip install plotly")
-        return False
-    except Exception as e:
-        st.error(f"Error creating visual mindmap: {e}")
-        return False
+            
+            content = response.choices[0].message.content
+            lines = [line.strip() for line in content.split('\n') if line.strip()]
+            
+            mindmap = []
+            current_main = topic
+            
+            for line in lines:
+                if line.startswith('-') or line.startswith('•') or line.startswith('*'):
+                    sub_concept = line.lstrip('-•*').strip()
+                    if sub_concept and len(sub_concept) > 2:
+                        mindmap.append({'main': current_main, 'sub': sub_concept})
+                elif ':' in line:
+                    # Handle lines like "Main concept: sub concept"
+                    parts = line.split(':', 1)
+                    if len(parts) == 2:
+                        main_part = parts[0].strip()
+                        sub_part = parts[1].strip()
+                        if main_part and sub_part:
+                            mindmap.append({'main': main_part, 'sub': sub_part})
+                elif len(line) < 60 and len(line) > 5:  # Likely a main concept
+                    current_main = line.strip(':-•*')
+            
+            # Ensure we have some data
+            if not mindmap:
+                mindmap = [
+                    {'main': topic, 'sub': 'Key Concept 1'},
+                    {'main': topic, 'sub': 'Key Concept 2'},
+                    {'main': topic, 'sub': 'Important Detail'},
+                ]
+            
+            return mindmap[:10]  # Limit to 10 items
+            
+        except Exception as e:
+            # Fallback mindmap
+            return [
+                {'main': topic, 'sub': 'Main Concept'},
+                {'main': topic, 'sub': 'Key Detail'},
+                {'main': topic, 'sub': 'Important Point'},
+            ]
 
-def _render_visualization(self):
-    """Render visualization page with working visuals."""
-    st.title("📊 Knowledge Visualization")
-    
-    if not st.session_state.documents:
-        st.warning("📁 No documents uploaded yet.")
-        if st.button("📁 Upload Documents"):
-            st.session_state.current_page = 'upload'
-            st.rerun()
-        return
-    
-    if not self.client:
-        st.error("❌ OpenAI API key not configured. Go to Settings.")
-        return
-    
-    st.markdown("### Create Visual Knowledge Maps")
-    
-    # Visualization input
-    viz_type = st.radio("Type", ["Flowchart", "Mindmap"], horizontal=True)
-    
-    query = st.text_area(
-        "What would you like to visualize?",
-        placeholder="Enter a topic from your documents to create a visual representation...",
-        help="Try: 'Show me the main concepts', 'Visualize the process', or 'Map out the key information'"
-    )
-    
-    # Example queries
-    st.markdown("**💡 Example queries:**")
-    examples = [
-        "Show me the main concepts",
-        "Visualize the key information", 
-        "Map out the important details",
-        "Create a overview of the content"
-    ]
-    
-    example_cols = st.columns(4)
-    for i, example in enumerate(examples):
-        with example_cols[i]:
-            if st.button(example, key=f"example_{i}"):
-                query = example
-    
-    if st.button("🎨 Generate Visualization", type="primary") and query:
-        with st.spinner(f"Generating {viz_type.lower()}..."):
-            try:
-                # Get relevant content
-                relevant_chunks = self._find_relevant_chunks(query)
+    def _render_mindmap_visual(self, connections: List[dict]):
+        """Render mindmap as an interactive network using Plotly."""
+        try:
+            import plotly.graph_objects as go
+            import plotly.express as px
+            from plotly.subplots import make_subplots
+            import networkx as nx
+            import numpy as np
+            
+            # Create network graph
+            G = nx.Graph()
+            
+            # Add edges from connections
+            for conn in connections:
+                G.add_edge(conn['main'], conn['sub'])
+            
+            # Calculate layout
+            pos = nx.spring_layout(G, k=3, iterations=50, seed=42)
+            
+            # Create edge traces
+            edge_x = []
+            edge_y = []
+            for edge in G.edges():
+                x0, y0 = pos[edge[0]]
+                x1, y1 = pos[edge[1]]
+                edge_x.extend([x0, x1, None])
+                edge_y.extend([y0, y1, None])
+            
+            edge_trace = go.Scatter(
+                x=edge_x, y=edge_y,
+                line=dict(width=2, color='#888'),
+                hoverinfo='none',
+                mode='lines'
+            )
+            
+            # Create node traces
+            node_x = []
+            node_y = []
+            node_text = []
+            node_info = []
+            node_colors = []
+            node_sizes = []
+            
+            # Get unique nodes and classify them
+            main_nodes = set(conn['main'] for conn in connections)
+            
+            for node in G.nodes():
+                x, y = pos[node]
+                node_x.append(x)
+                node_y.append(y)
                 
-                if not relevant_chunks:
-                    st.error("No relevant content found for this topic.")
-                    return
+                # Shorten long text for display
+                display_text = node if len(node) <= 20 else node[:17] + "..."
+                node_text.append(display_text)
+                node_info.append(node)  # Full text for hover
                 
-                context = "\n".join([chunk['content'] for chunk in relevant_chunks[:3]])
-                
-                if viz_type == "Flowchart":
-                    st.info("🔄 Creating flowchart...")
-                    flowchart = self._generate_flowchart(query, context)
-                    
-                    if flowchart:
-                        st.success("✅ Flowchart generated!")
-                        
-                        # Debug info
-                        with st.expander("🔍 Debug - View DOT Code"):
-                            st.code(flowchart, language='dot')
-                        
-                        try:
-                            st.graphviz_chart(flowchart)
-                        except Exception as e:
-                            st.error(f"Error rendering flowchart: {e}")
-                            st.code(flowchart, language='dot')
-                    else:
-                        st.error("Failed to generate flowchart")
-                
-                else:  # Mindmap
-                    st.info("🧠 Creating mindmap...")
-                    mindmap_data = self._generate_mindmap(query, context)
-                    
-                    if mindmap_data:
-                        st.success("✅ Mindmap generated!")
-                        
-                        # Try to render visual mindmap
-                        visual_success = self._render_mindmap_visual(mindmap_data)
-                        
-                        if not visual_success:
-                            # Fallback to text display
-                            st.markdown("#### 🧠 Mindmap Structure:")
-                            for i, item in enumerate(mindmap_data, 1):
-                                st.markdown(f"{i}. **{item['main']}** → {item['sub']}")
-                        
-                        # Show connections in expandable section
-                        with st.expander("📋 View Mindmap Connections"):
-                            for item in mindmap_data:
-                                st.write(f"• **{item['main']}** connects to **{item['sub']}**")
-                    else:
-                        st.error("Failed to generate mindmap")
-                
-            except Exception as e:
-                st.error(f"Error generating visualization: {e}")
-                st.info("💡 Try a simpler query or check your document content.")
-    
+                # Color and size based on node type
+                if node in main_nodes:
+                    node_colors.append('#FF6B6B')  # Red for main topics
+                    node_sizes.append(30)
+                else:
+                    node_colors.append('#4ECDC4')  # Teal for sub-concepts
+                    node_sizes.append(20)
+            
+            node_trace = go.Scatter(
+                x=node_x, y=node_y,
+                mode='markers+text',
+                hoverinfo='text',
+                hovertext=node_info,
+                text=node_text,
+                textposition="middle center",
+                textfont=dict(size=10, color='white'),
+                marker=dict(
+                    size=node_sizes,
+                    color=node_colors,
+                    line=dict(width=2, color='white')
+                )
+            )
+            
+            # Create the figure
+            fig = go.Figure(data=[edge_trace, node_trace],
+                           layout=go.Layout(
+                               title='Interactive Mindmap',
+                               titlefont_size=16,
+                               showlegend=False,
+                               hovermode='closest',
+                               margin=dict(b=20,l=5,r=5,t=40),
+                               annotations=[ dict(
+                                   text="Click and drag to explore the mindmap",
+                                   showarrow=False,
+                                   xref="paper", yref="paper",
+                                   x=0.005, y=-0.002,
+                                   xanchor="left", yanchor="bottom",
+                                   font=dict(color="gray", size=12)
+                               )],
+                               xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                               yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                               height=500,
+                               plot_bgcolor='white'
+                           ))
+            
+            st.plotly_chart(fig, use_container_width=True)
+            return True
+            
+        except ImportError:
+            st.error("Plotly not available. Install with: pip install plotly")
+            return False
+        except Exception as e:
+            st.error(f"Error creating visual mindmap: {e}")
+            return False
+
     def _render_settings(self):
         """Render settings page."""
         st.title("⚙️ Settings")
